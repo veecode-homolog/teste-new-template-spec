@@ -8,7 +8,7 @@ metadata:
   environment:
     cluster_type: ec2
     ingress_type: kong
-    domain: ${{ values.host_name }}
+    domain: teste-new-template-spec
     github.com/workflows: deploy.yml,destroy.yml
     cluster/instructions: |
       scp -i ./key-pair.pem ${EC2_USER}@${EC2_HOST}:/home/${EC2_USER}/.kube/config ~/.kube/config    
