@@ -5,6 +5,13 @@ metadata:
   annotations:
     github.com/project-slug: veecode-homolog/teste-new-template-spec
     backstage.io/techdocs-ref: dir:.
+  environment:
+    cluster_type: ec2
+    ingress_type: kong
+    domain: ${{ values.host_name }}
+    github.com/workflows: deploy.yml,destroy.yml
+    cluster/instructions: |
+      scp -i ./key-pair.pem ${EC2_USER}@${EC2_HOST}:/home/${EC2_USER}/.kube/config ~/.kube/config    
 spec:
   type: ec2
   lifecycle: experimental
