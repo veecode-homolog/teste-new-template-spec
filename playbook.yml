@@ -1,0 +1,340 @@
+---
+- name: Setup veecode-saas host
+  hosts: veecode
+  become: yes
+  vars_files:
+    - vault.yml
+  environment:
+    KUBECONFIG: "/home/{{ ansible_user }}/.kube/config"
+
+  tasks:
+    - name: Update and upgrade yum packages
+      yum:
+        name: "*"
+        state: latest
+        update_cache: yes
+
+    - name: Install required packages
+      yum:
+        name:
+          - curl-minimal
+          - wget
+          - openssl
+          - git
+          - unzip
+          - docker
+          - sed
+        state: present
+
+    - name: Install k3s
+      shell: curl -sfL https://get.k3s.io | INSTALL_K3S_EXEC="--disable traefik --https-listen-port 6550" sh -
+
+    - name: Install Helm
+      shell: curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash            
+
+    - name: mkdir .kube
+      shell: |
+        rm -rf /home/{{ ansible_user }}/.kube 2>/dev/null
+        mkdir /home/{{ ansible_user }}/.kube
+
+    - name: Copy k3s config to user kube config
+      copy:
+        src: /etc/rancher/k3s/k3s.yaml
+        dest: /home/{{ ansible_user }}/.kube/config
+        remote_src: yes
+
+    - name: Modify kube config for insecure skip tls verify
+      replace:
+        path: /home/{{ ansible_user }}/.kube/config
+        regexp: 'certificate-authority-data:.*'
+        replace: 'insecure-skip-tls-verify: true'
+
+    - name: Get EC2 public IP
+      shell: |
+        export TOKEN=$(curl -sX PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600")
+        export EC2_PUBLIC_IP=$(curl -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/public-ipv4)
+        echo $EC2_PUBLIC_IP
+      register: ec2_public_ip
+
+    - name: Update kube config with EC2 public IP
+      replace:
+        path: /home/{{ ansible_user }}/.kube/config
+        regexp: '127.0.0.1'
+        replace: '{{ ec2_public_ip.stdout }}'
+
+    - name: define KUBECONFIG
+      shell: |
+        echo "export KUBECONFIG=/home/{{ ansible_user }}/.kube/config" >> /home/{{ ansible_user }}/.bashrc
+
+    - name: Add Helm repositories
+      shell: |
+        helm repo add bitnami https://charts.bitnami.com/bitnami
+        helm repo add kong https://charts.konghq.com
+        helm repo add veecode-platform https://veecode-platform.github.io/public-charts/
+        helm repo update
+        
+    - name: Create namespace platform if not exists
+      shell: |
+        kubectl get namespace platform || kubectl create namespace platform
+
+    - name: Install postgresql
+      shell: |
+        helm upgrade --install postgres-postgresql bitnami/postgresql --version {{ POSTGRES_CHART_VERSION }} \
+          --set volumePermissions.enabled=true \
+          --set primary.persistence.size=8Gi \
+          --set fullnameOverride=postgres-postgresql \
+          --set global.postgresql.auth.postgresPassword={{ POSTGRES_ADMIN_PASSWORD }} \
+          --set global.postgresql.auth.database=kong 
+
+    - name: Install Kong
+      shell: |
+        helm upgrade --install kong kong/kong --version {{ KONG_CHART_VERSION }} \
+          --set admin.annotations.'konghq\.com/plugins'=kong-admin-basicauth \
+          --set admin.enabled=true \
+          --set admin.http.containerPort=8001 \
+          --set admin.http.enabled=true \
+          --set admin.http.servicePort=8001 \
+          --set admin.ingress.annotations.'konghq\.com/plugins'=kong-admin-basicauth \
+          --set admin.ingress.annotations.'konghq\.com/strip-path'=true \
+          --set admin.ingress.annotations.'kubernetes\.io/tls-acme'=true \
+          --set admin.ingress.enabled=true \
+          --set admin.ingress.hostname=manager.{{ HOST_NAME }} \
+          --set admin.ingress.ingressClassName=kong \
+          --set admin.ingress.path=/ \
+          --set admin.tls.enabled=false \
+          --set admin.type=ClusterIP \
+          --set clustertelemetry.enabled=true \
+          --set enterprise.enabled=false \
+          --set env.admin_gui_api_url=https://manager.{{ HOST_NAME }} \
+          --set env.admin_gui_path=/manager \
+          --set env.admin_gui_url=https://manager.{{ HOST_NAME }}/manager \
+          --set env.database=postgres \
+          --set env.log_level=notice \
+          --set env.pg_database=kong \
+          --set env.pg_host=postgres-postgresql.default \
+          --set env.pg_password.valueFrom.secretKeyRef.key=postgres-password \
+          --set env.pg_password.valueFrom.secretKeyRef.name=postgres-postgresql \
+          --set env.pg_port=5432 \
+          --set env.pg_user=postgres \
+          --set env.portal=false \
+          --set env.proxy_url=https://{{ HOST_NAME }} \
+          --set env.tracing_instrumentations=all \
+          --set env.tracing_sampling_rate=1 \
+          --set ingressController.enabled=true \
+          --set ingressController.env.kong_admin_tls_skip_verify=true \
+          --set ingressController.ingressClass=kong \
+          --set ingressController.rbac.create=true \
+          --set manager.annotations.'konghq\.com/plugins'=kong-admin-basicauth \
+          --set manager.enabled=true \
+          --set manager.http.containerPort=8002 \
+          --set manager.http.enabled=true \
+          --set manager.http.servicePort=8002 \
+          --set manager.ingress.annotations.'konghq\.com/plugins'=kong-admin-basicauth \
+          --set manager.ingress.annotations.'kubernetes\.io/tls-acme'=true \
+          --set manager.ingress.enabled=true \
+          --set manager.ingress.hostname=manager.{{ HOST_NAME }} \
+          --set manager.ingress.ingressClassName=kong \
+          --set manager.ingress.path=/manager \
+          --set manager.tls.enabled=false \
+          --set manager.type=ClusterIP \
+          --set portal.enabled=false \
+          --set portalapi.enabled=false \
+          --set postgresql.enabled=false \
+          --set proxy.enabled=true \
+          --set proxy.http.containerPort=8000 \
+          --set proxy.http.enabled=true \
+          --set proxy.http.servicePort=80 \
+          --set proxy.tls.containerPort=8443 \
+          --set proxy.tls.enabled=true \
+          --set proxy.tls.servicePort=443 \
+          --set proxy.type=LoadBalancer 
+
+    - name: Apply Kong ACME configuration 
+      shell: |
+        kubectl apply -f - <<EOF
+        apiVersion: configuration.konghq.com/v1
+        kind: KongClusterPlugin
+        metadata:
+          name: global-acme
+          annotations:
+            kubernetes.io/ingress.class: kong
+          labels:
+            global: "true"
+        config:
+          storage: kong
+          allow_any_domain: true
+          tos_accepted: true
+          fail_backoff_minutes: 1
+          account_email: 'platform@vee.codes'
+          api_uri: https://acme-staging-v02.api.letsencrypt.org/directory
+          # api_uri: https://acme-v02.api.letsencrypt.org/directory
+        plugin: acme
+        EOF
+
+    - name: Apply Kong Basic auth configuration - Create Secret
+      shell: |
+        kubectl apply -f - <<EOF
+        apiVersion: v1
+        kind: Secret
+        metadata:
+          name: kong-admin-basicauth
+          namespace: default
+          labels:
+            konghq.com/credential: basic-auth
+        stringData:
+          username: kong_admin
+          password: {{ KONG_ADMIN_PASSWORD }}
+        EOF
+
+    - name: Apply Kong Basic auth configuration - Create KongPlugin
+      shell: |
+        kubectl apply -f - <<EOF
+        apiVersion: configuration.konghq.com/v1
+        kind: KongPlugin
+        metadata:
+          name: kong-admin-basicauth
+          namespace: default
+          annotations:
+            kubernetes.io/ingress.class: kong
+        config:
+          hide_credentials: true
+        plugin: basic-auth
+        EOF
+
+    - name: Apply Kong Basic auth configuration - Create KongConsumer
+      shell: |
+        kubectl apply -f - <<EOF
+        apiVersion: configuration.konghq.com/v1
+        kind: KongConsumer
+        metadata:
+          name: consumer-kong-admin
+          namespace: default
+          annotations:
+            kubernetes.io/ingress.class: kong
+        username: kong_admin
+        credentials:
+          - kong-admin-basicauth
+        EOF
+
+    - name: Apply Devportal GithubApp token secret
+      shell: |
+        kubectl apply -f - <<EOF
+        apiVersion: v1
+        data:
+          github-app-credentials: {{ GITHUB_APP_BASE_64 }}
+        kind: Secret
+        metadata:
+          name: devportal-github-app
+          namespace: platform
+        type: Opaque
+        EOF
+
+    - name: Install Platform DevPortal
+      shell: |
+        helm upgrade platform-devportal veecode-platform/devportal --version 0.19.6 --install --wait --timeout 10m --create-namespace -n platform \
+          --set appConfig.app.baseUrl=https://devportal.{{ HOST_NAME }} \
+          --set appConfig.backend.baseUrl=https://devportal.{{ HOST_NAME }} \
+          --set appConfig.backend.secret=13d08353-35a1-41ce-882c-c1370edcf838 \
+          --set appConfig.database.client=pg \
+          --set appConfig.database.connection.database=platform_devportal \
+          --set appConfig.database.connection.host=postgres-postgresql.default \
+          --set appConfig.database.connection.password={{ POSTGRES_ADMIN_PASSWORD }} \
+          --set appConfig.database.connection.port=5432 \
+          --set appConfig.database.connection.user=postgres \
+          --set appConfig.title=Devportal \
+          --set auth.providers.github.clientId={{ GITHUB_CLIENT_ID }} \
+          --set auth.providers.github.clientSecret={{ GITHUB_CLIENT_SECRET }} \
+          --set auth.providers.keycloak.admin.password={{ KEYCLOAK_ADMIN_PASSWORD }} \
+          --set auth.providers.keycloak.admin.username=admin \
+          --set auth.providers.keycloak.clientId={{ KEYCLOAK_AUTH_CLIENT_ID }} \
+          --set auth.providers.keycloak.clientSecret={{ KEYCLOAK_AUTH_CLIENT_SECRET }} \
+          --set auth.providers.keycloak.metadataUrl={{ KEYCLOAK_BASE_URL }}/realms/{{ KEYCLOAK_REALM }}/.well-known/openid-configuration \
+          --set catalog.providers.github.catalogPath=/catalog-info.yaml \
+          --set catalog.providers.github.filters.branch={{ GITHUB_ORGANIZATION_BRANCH }} \
+          --set catalog.providers.github.organization={{ GITHUB_ORGANIZATION }} \
+          --set catalog.providers.github.schedule.frequency=1 \
+          --set catalog.providers.github.schedule.timeout=5 \
+          --set catalog.providers.github.validateLocationsExist=true \
+          --set catalog.providers.keycloak.baseUrl={{ KEYCLOAK_BASE_URL }} \
+          --set catalog.providers.keycloak.clientId={{ KEYCLOAK_CATALOG_CLIENT_ID }} \
+          --set catalog.providers.keycloak.clientSecret={{ KEYCLOAK_CATALOG_CLIENT_SECRET }} \
+          --set catalog.providers.keycloak.groupQuerySize=250 \
+          --set catalog.providers.keycloak.loginRealm={{ KEYCLOAK_REALM }} \
+          --set catalog.providers.keycloak.realm={{ KEYCLOAK_REALM }} \
+          --set catalog.providers.keycloak.schedule.frequency=5 \
+          --set catalog.providers.keycloak.schedule.initialDelay=1 \
+          --set catalog.providers.keycloak.schedule.timeout=5 \
+          --set catalog.providers.keycloak.userQuerySize=500 \
+          --set catalog.rules[0].allow[0]=Component \
+          --set catalog.rules[0].allow[1]=API \
+          --set catalog.rules[0].allow[2]=Location \
+          --set catalog.rules[0].allow[3]=Cluster \
+          --set catalog.rules[0].allow[4]=Template \
+          --set catalog.rules[0].allow[5]=Environment \
+          --set catalog.rules[0].allow[6]=Database \
+          --set catalog.rules[0].allow[7]=Infracost \
+          --set environment=development \
+          --set image.pullPolicy=IfNotPresent \
+          --set image.repository=veecode/devportal-bundle \
+          --set ingress.className=kong \
+          --set ingress.enabled=true \
+          --set ingress.host=devportal.{{ HOST_NAME }} \
+          --set ingress.annotations.'kubernetes\.io/tls-acme'="\"true\"" \
+          --set integrations.github.apps.secretName=devportal-github-app \
+          --set extraEnv[0].name=NODE_TLS_REJECT_UNAUTHORIZED \
+          --set extraEnv[0].value=0 \          
+          --set kubernetes.serviceLocatorMethod.type=multiTenant \
+          --set kubernetes.clusterLocatorMethods[0].type=catalog \
+          --set livenessProbe.httpGet.path=/healthcheck \
+          --set livenessProbe.httpGet.port=7007 \
+          --set livenessProbe.initialDelaySeconds=60 \
+          --set livenessProbe.periodSeconds=10 \
+          --set platform.apiManagement.enabled=true \
+          --set platform.defaultGroups.admin=admin \
+          --set platform.defaultGroups.enabled=true \
+          --set platform.defaultGroups.user=user \
+          --set platform.guest.enabled=false \
+          --set platform.support.licenseKey=018fea2b-631a-7947-9392-5d602a088fa0 \
+          --set replicas=1 \
+          --set resources.limits.memory=512Mi \
+          --set resources.requests.memory=256Mi \
+          --set service.containerPort=7007 \
+          --set service.enabled=true \
+          --set service.name=devportal \
+          --set service.type=ClusterIP 
+
+    - name: Install DevPortal Admin UI
+      shell: |
+        helm get values platform-devportal -n platform > current.yaml          
+
+    - name: Install DevPortal Admin UI
+      shell: |
+        helm upgrade --install devportal-admin-ui --wait --timeout 8m veecode-platform/devportal-admin-ui --version {{ ADMIN_UI_CHART_VERSION }} --create-namespace -n platform \
+          --set serviceAccount.create=true \
+          --set ingress.enabled=true \
+          --set ingress.className=kong \
+          --set ingress.hosts[0].host=devportal.{{ HOST_NAME }} \
+          --set ingress.hosts[0].paths[0].path=/admin-ui,ingress.hosts[0].paths[0].pathType=Prefix \
+          --set ingress.annotations.'konghq\.com/strip-path'="\"true\"" \
+          --set ingress.annotations.'kubernetes\.io/tls-acme'="\"true\"" \
+          --set appConfig.chartValuesFileName=current.yaml \
+          --set appConfig.filePath=./platform/admin-ui \
+          --set appConfig.baseURL=http://devportal.{{ HOST_NAME }}/admin-ui \
+          --set appConfig.sslProduction=false \
+          --set readinessProbe.exec.command[0]=cat \
+          --set readinessProbe.exec.command[1]=/tmp/healthy \
+          --set readinessProbe.initialDelaySeconds=5 \
+          --set readinessProbe.periodSeconds=5 \
+          --set livenessProbe.exec.command[0]=cat \
+          --set livenessProbe.exec.command[1]=/tmp/healthy \
+          --set livenessProbe.initialDelaySeconds=5 \
+          --set livenessProbe.periodSeconds=5 \
+          --set persistence.enabled=true \
+          --set persistence.storageClassName=manual \
+          --set persistence.accessModes[0]=ReadWriteOnce \
+          --set persistence.size=1Gi \
+          --set persistence.hostPath=/platform-volume/admin-ui \
+          --set persistentVolumeClaim.enabled=true \
+          --set persistentVolumeClaim.storageClassName=manual \
+          --set persistentVolumeClaim.accessModes[0]=ReadWriteOnce \
+          --set persistentVolumeClaim.resources.requests.storage=1Gi     

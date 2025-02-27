@@ -1,0 +1,8 @@
+apiVersion: backstage.io/v1alpha1
+kind: Location
+metadata:
+  name: teste-new-template-spec-location
+  description: Location to import all teste-new-template-spec catalog components
+spec:
+  targets:
+    - ./.platform/*.yaml

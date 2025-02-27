@@ -1,0 +1,19 @@
+---
+POSTGRES_ADMIN_PASSWORD: "your_postgres_admin_password"
+POSTGRES_CHART_VERSION: "15.5.17" # replace with your preferred version from postgres chart
+KONG_ADMIN_PASSWORD: "your_kong_admin_password"
+KONG_CHART_VERSION: "2.42.0" # replace with your preferred version from kong chart
+ADMIN_UI_CHART_VERSION: "0.5.0" # replace with your preferred version from admin-ui chart
+DEVPORTAL_CHART_VERSION: "0.19.6" # replace with your preferred version from devportal chart
+KEYCLOAK_BASE_URL: "your_keycloak_base_url"
+KEYCLOAK_REALM: "your_keycloak_realm"
+KEYCLOAK_AUTH_CLIENT_SECRET: "your_keycloak_auth_client_secret"
+KEYCLOAK_AUTH_CLIENT_ID: "your_keycloak_auth_client_id"
+KEYCLOAK_CATALOG_CLIENT_SECRET: "your_keycloak_catalog_client_secret"
+KEYCLOAK_CATALOG_CLIENT_ID: "your_keycloak_catalog_client_id"
+KEYCLOAK_ADMIN_PASSWORD: "your_keycloak_admin_password"
+GITHUB_CLIENT_ID: "your_github_client_id"
+GITHUB_CLIENT_SECRET: "your_github_client_secret"
+GITHUB_ORGANIZATION: "your_github_organization"
+GITHUB_ORGANIZATION_BRANCH: "your_github_organization_branch"
+GITHUB_APP_BASE_64: "your_github_app_base_64"

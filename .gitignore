@@ -1,0 +1,9 @@
+*.lock.hcl
+.terraform/
+*.tfstate
+*backup
+.infracost
+hosts
+cert.pem
+config
+.vault_pass
